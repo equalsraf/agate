@@ -16,7 +16,7 @@ use {
         error::Error,
         ffi::OsStr,
         fmt::Write,
-        fs::{self, File},
+        fs::{self, File, Permissions, set_permissions},
         io::Write as _,
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         path::{self, Component, Path, PathBuf},
@@ -36,6 +36,7 @@ use {
 use {
     std::os::unix::fs::FileTypeExt,
     tokio::net::{UnixListener, UnixStream},
+    std::os::unix::fs::PermissionsExt,
 };
 
 static DEFAULT_PORT: u16 = 1965;
@@ -103,7 +104,7 @@ fn main() {
             };
 
             #[cfg(unix)]
-            for socketpath in &ARGS.sockets {
+            for (idx, socketpath) in ARGS.sockets.iter().enumerate() {
                 let arc = mimetypes.clone();
 
                 if socketpath.exists() && socketpath.metadata()
@@ -120,6 +121,11 @@ fn main() {
                     }
                     Ok(listener) => listener,
                 };
+
+                if let Some(perm) = ARGS.socketperms.get(idx) {
+                    set_permissions(socketpath, Permissions::from_mode(*perm))
+                        .expect("Unable to set socket permissions");
+                }
 
                 handles.push(tokio::spawn(async move {
                     log::info!("Started listener on {}", socketpath.display());
@@ -161,6 +167,8 @@ struct Args {
     addrs: Vec<SocketAddr>,
     #[cfg(unix)]
     sockets: Vec<PathBuf>,
+    #[cfg(unix)]
+    socketperms: Vec<u32>,
     content_dir: PathBuf,
     certs: Arc<certificates::CertStore>,
     hostnames: Vec<Host>,
@@ -199,6 +207,13 @@ fn args() -> Result<Args> {
         "socket",
         "Unix socket to listen on (multiple occurences means listening on multiple sockets)",
         "PATH",
+    );
+    #[cfg(unix)]
+    opts.optmulti(
+        "",
+        "socketperm",
+        "Octal permission to be applied to Unix socket (specify once per --socket)",
+        "PERMISSION",
     );
     opts.optmulti(
         "",
@@ -361,6 +376,11 @@ fn args() -> Result<Args> {
 
         empty &= sockets.is_empty();
     }
+    #[cfg(unix)]
+    let socketperms = matches.opt_strs("socketperm")
+        .iter()
+        .map(|s| u32::from_str_radix(&s, 8).expect("Invalid socket permission"))
+        .collect();
 
     if empty {
         addrs = vec![
@@ -373,6 +393,8 @@ fn args() -> Result<Args> {
         addrs,
         #[cfg(unix)]
         sockets,
+        #[cfg(unix)]
+        socketperms,
         content_dir: check_path(matches.opt_get_default("content", "content".into())?)?,
         certs: Arc::new(certs),
         hostnames,
